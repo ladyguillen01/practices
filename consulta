@@ -1,0 +1,102 @@
+consulta: 
+HAola tengo este query inicial:
+
+CREATE OR REPLACE TABLE catalog_lhcl_prod_bcp.bcp_edv_rbm.T65734_TERCIOMIVIVIENDA
+USING DELTA
+LOCATION 'abfss://bcp-edv-rbm@adlscu1lhclbackp05.dfs.core.windows.net/T65734/Tercio/T65734_TERCIOMIVIVIENDA'
+AS
+with temp_grado_sos AS (/*
+	SELECT distinct codinternocomputacional,codsolicitudmic as numsolicitudmic,
+	replace(destipgradosostenibilidadproyecto, ' ', '') as GRADO_SOSTENIBILIDAD
+	FROM 
+	catalog_lhcl_prod_bcp.bcp_ddv_hip_flujosolicitudcreditohip_vu.ME_CONSOLIDADOSOLICITUDCREDITOHIPOTECARIOFLUJOANTIGUO
+	where destipgradosostenibilidadproyecto is not null
+	and replace(destipgradosostenibilidadproyecto, ' ', '') IN ('GRADO1','GRADO2','GRADO3')
+	UNION 
+	SELECT  codinternocomputacional,
+	numsolicitud as numsolicitudmic,
+	DESGRADOSOSTENIBILIDAD as GRADO_SOSTENIBILIDAD
+	FROM
+	catalog_lhcl_prod_bcp.bcp_udv_int_vu.m_solicitudcreditohipotecario
+	where codapp='COPH' AND tipestadosolicitud='ACPD' AND DESGRADOSOSTENIBILIDAD is not null
+	and trim(DESGRADOSOSTENIBILIDAD) IN ('GRADO 1','GRADO 2','GRADO 3')*/ select codinternocomputacional,numsolicitudmic, regexp_replace(GRADO_SOSTENIBILIDAD, ' ', '') as GRADO_SOSTENIBILIDAD from catalog_lhcl_prod_bcp.bcp_edv_rbm.temp_grado_sos
+),
+
+/*generacion de creditos mivivienda - universo*/
+MiVivienda_Garantias_0 as(
+select 
+distinct
+a.codclavecta,
+a.codclavepartycli,
+a.codinternocomputacionalfin as codinternocomputacional,
+b.codclavectagar as CODOPECTAGAR,
+c.tipestadogar as TIPESTGAR,
+d.codproductoapp as CODTIPPRESTAMO,
+d.fecdesembolso as FECDESEMBOLSOORIGINAL,
+regexp_replace(E.numsolicitud, ' ', '') AS numsolicitud,
+E.mtobienadquirir,
+CASE WHEN SUBSTR(d.codsolicitud,1,2)='CC' THEN 1 ELSE 0 END AS FLG_CC
+from 
+(select* from catalog_lhcl_prod_bcp.bcp_ddv_pycf_cubowu_vu.f_reportegestion
+WHERE date_format(fecdia, 'yyyyMM') = 202512 and codproductofin in ('CPEHMM','CPEHMR','CPEHMV','CPEHTP','CPTM01','CPEHTR','CPEHMP') AND tipllavemoneda = 1    --'CPEHTP','CPEHMV','CPEHMR','CPEHMM','CPEHMP'     ----validar 'CPEHTR'
+AND regexp_replace(codestadomorosidad, ' ', '') in ('ESVIG', 'ESVEN', 'ESJUD') and codctacontablefin not like '1418%' and codctacontablefin not like '1428%'
+AND regexp_replace(codfuentedato, ' ', '') in ('ALS','COBT','CSCC','CSCO','WLEA','CTAO', 'BKTD','CSCB','VPLU')) a
+left join catalog_lhcl_prod_bcp.bcp_udv_int_vu.m_relacioncuentacreditopersonalgarantia b on a.codclavecta=b.codclavecta and b.flgregeliminadofuente='N'
+left join catalog_lhcl_prod_bcp.bcp_udv_int_vu.m_garantia c on b.codclavectagar=c.codclavegar and c.flgregeliminadofuente='N'
+left join catalog_lhcl_prod_bcp.bcp_udv_int_vu.m_cuentacreditopersonal d on a.codclavecta=d.codclavecta
+LEFT JOIN catalog_lhcl_prod_bcp.bcp_udv_int_vu.m_solicitudcreditohipotecario E
+			ON regexp_replace(D.codsolicitud, ' ', '')=cast(cast(regexp_replace(E.codsolicitud, ' ', '') as int) +20000000000 as varchar(20))
+where
+d.codproductoapp in ('HBIV','HITP','HMIV','HSIV','HVIV','HTIV')
+),
+
+/*tabla intermedia que une el universo de mivivienda con el grado de sostenibilidad*/
+MiVivienda_Garantias_01 as (
+SELECT A.*,B.GRADO_SOSTENIBILIDAD FROM
+MiVivienda_Garantias_0 A
+LEFT JOIN temp_grado_sos B
+ON regexp_replace(A.NUMSOLICITUD, ' ', '')=regexp_replace(B.NUMSOLICITUDMIC, ' ', '') AND A.NUMSOLICITUD IS NOT NULL),
+
+/*se crea el % de cobertura segun los criterios del correo*/
+MiVivienda_Garantias_1 as (
+select distinct a.*,
+regexp_replace(CODINTERNOCOMPUTACIONAL, '[^0-9A-Za-z]', '') as CIC, --compress(CODINTERNOCOMPUTACIONAL),
+/*substr(b.CODDOC,5,8) as IDC,
+b.TIPDOC as TIPO_IDC,
+substr(compress(b.NBRCLI)||' '||compress(b.APEPATCLI)||' '||compress(b.APEMATCLI),1,40) as NOMBRES,*/
+CASE WHEN FLG_CC=1 THEN 0.333333
+     WHEN FECDESEMBOLSOORIGINAL>=DATE'2022-01-01' then--datepart(FECDESEMBOLSOORIGINAL)>='1jan2022'd then 
+		case when MTOBIENADQUIRIR<=232200 then 
+  CASE when grado_sostenibilidad=('GRADO1') THEN 0.16670
+				WHEN grado_sostenibilidad=('GRADO2') THEN 0.26670
+				WHEN grado_sostenibilidad=('GRADO3') THEN 0.36670
+				ELSE 0.066700 
+  END 
+        	     when MTOBIENADQUIRIR>232200 then 
+  CASE when grado_sostenibilidad=('GRADO1') THEN 0.066700
+				WHEN grado_sostenibilidad=('GRADO2') THEN 0.166700
+				WHEN grado_sostenibilidad=('GRADO3') THEN 0.266700
+				ELSE 0.000000 
+  END  
+        	     ELSE 0.333333 
+		END 
+	ELSE 0.333333 
+     END   
+as COBERTURA_ADICIONAL
+from MiVivienda_Garantias_01 a
+/*left join catalog_lhcl_prod_bcp.bcp_ddv_crm_accioncontextualizada.md_cliente b on */
+where tipestgar = '10')--AND COBERTURA_ADICIONAL>0
+select*from  MiVivienda_Garantias_1 WHERE COBERTURA_ADICIONAL>0
+
+
+quiero que me generes un query a partir de estas tablas originales, no del universo creado, para ver el mtobienadquirir en donde se pueda ver a qué CIC pertenece de estos cic 1261926
+3009569
+4544193
+3355538
+1159938
+1871311
+4429834
+7234180
+2528053
+7547081
+4789579
